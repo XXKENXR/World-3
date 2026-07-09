@@ -1,4 +1,4 @@
--- Kenscript_Mundo3.lua (mobile-friendly: botones, espera Character, play en spawn)
+-- Kenscript_Mundo3.lua (mobile: reproducción robusta con timeouts + tween/lerp fallback)
 local Rayfield = loadstring(game:HttpGet('https://sirius.menu/rayfield'))()
 
 local Window = Rayfield:CreateWindow({
@@ -10,7 +10,6 @@ local Window = Rayfield:CreateWindow({
 
 -- Key System
 local KeyTab = Window:CreateTab("Key System", 4483362458)
-
 local function onKeyEntered(Value)
    if (Value or ""):upper() == "XKR" then
       Rayfield:Notify({Title = "✅ Key Correcta", Content = "Acceso concedido", Duration = 4})
@@ -19,13 +18,7 @@ local function onKeyEntered(Value)
       Rayfield:Notify({Title = "❌ Key Incorrecta", Content = "Key Invalid", Duration = 3})
    end
 end
-
-KeyTab:CreateInput({
-   Name = "Key",
-   PlaceholderText = "Ingresa la clave...",
-   Callback = onKeyEntered,
-})
-
+KeyTab:CreateInput({ Name = "Key", PlaceholderText = "Ingresa la clave...", Callback = onKeyEntered })
 KeyTab:CreateParagraph({Title = "Nota", Content = "El mejor script"})
 
 -- SERVICES
@@ -66,7 +59,7 @@ local function getCharacter(waitFor)
    return nil
 end
 
--- OBSTACLE CLEANER (cliente; puede no afectar partes protegidas por servidor)
+-- OBSTACLE CLEANER
 local function isObstacleName(s)
    if not s then return false end
    s = s:lower()
@@ -99,39 +92,85 @@ local function toggleCleanObstacles(state)
    end
 end
 
--- PATHFINDING / FOLLOW
-local function followPosition(targetPos, humanoid, hrp)
+-- PATHFINDING + FALLBACKS
+local function followPositionWithFallback(targetPos, humanoid, hrp)
    if not humanoid or not hrp then return false end
+
+   -- 1) Try Pathfinding
    local path = PathfindingService:CreatePath({AgentRadius = 2, AgentHeight = 5, AgentCanJump = true, AgentMaxSlope = 45})
    path:Compute(hrp.Position, targetPos)
-   if path.Status ~= Enum.PathStatus.Success then
-      return false
-   end
-   for _, wp in ipairs(path:GetWaypoints()) do
-      if wp.Action == Enum.PathWaypointAction.Jump then humanoid.Jump = true end
-      humanoid:MoveTo(wp.Position)
-      local ok = humanoid.MoveToFinished:Wait()
-      if not ok then
-         pcall(function() hrp.CFrame = CFrame.new(wp.Position + Vector3.new(0,3,0)) end)
+   if path.Status == Enum.PathStatus.Success then
+      local ok = true
+      for _, wp in ipairs(path:GetWaypoints()) do
+         if wp.Action == Enum.PathWaypointAction.Jump then humanoid.Jump = true end
+         humanoid:MoveTo(wp.Position)
+         -- timeout for reaching this waypoint
+         local reached = false
+         local t0 = tick()
+         while tick() - t0 < 6 do
+            if (hrp.Position - wp.Position).Magnitude <= 4 then reached = true; break end
+            wait(0.15)
+         end
+         if not reached then
+            ok = false
+            break
+         end
+         wait(0.03)
       end
-      wait(0.03)
+      if ok then return true end
+      notify("Pathfinding: parcial/falló", "Intentando fallback...", 2)
+   else
+      notify("Pathfinding falló", "Usando fallback...", 2)
    end
-   return true
+
+   -- 2) Tween HRP directly toward target
+   local successTween = pcall(function()
+      local dist = (hrp.Position - targetPos).Magnitude
+      local t = math.clamp(dist / 8, 0.2, 5)
+      local targetCFrame = CFrame.new(targetPos + Vector3.new(0, 3, 0))
+      local tween = TweenService:Create(hrp, TweenInfo.new(t, Enum.EasingStyle.Linear), {CFrame = targetCFrame})
+      tween:Play()
+      local t0 = tick()
+      while tween.PlaybackState ~= Enum.PlaybackState.Completed and tick()-t0 < t + 1.5 do wait(0.05) end
+   end)
+   if not successTween then
+      notify("Tween falló", "Intentando paso incremental...", 1.8)
+   else
+      if (hrp.Position - targetPos).Magnitude <= 6 then return true end
+   end
+
+   -- 3) Incremental Lerp steps (force small moves)
+   for i = 1, 12 do
+      pcall(function()
+         local nextCFrame = hrp.CFrame:Lerp(CFrame.new(targetPos + Vector3.new(0, 3, 0)), 0.18)
+         hrp.CFrame = nextCFrame
+      end)
+      wait(0.18)
+      if (hrp.Position - targetPos).Magnitude <= 6 then return true end
+   end
+
+   -- not reached
+   return false
 end
 
 local function followRoute(humanoid, hrp, points)
-   for _, pos in ipairs(points) do
-      local ok = followPosition(pos, humanoid, hrp)
-      if not ok then
-         pcall(function()
-            local dist = (hrp.Position - pos).Magnitude
-            local t = math.clamp(dist / 10, 0.2, 5)
-            local tw = TweenService:Create(hrp, TweenInfo.new(t, Enum.EasingStyle.Linear), {CFrame = CFrame.new(pos + Vector3.new(0,3,0))})
-            tw:Play(); tw.Completed:Wait()
-         end)
-         wait(0.2)
+   notify("Ejecutando ruta", "Waypoints: "..tostring(#points), 3)
+   for idx, pos in ipairs(points) do
+      if humanoid.Health <= 0 then
+         notify("Play parado", "Tu personaje está muerto", 3)
+         return
       end
+      notify("Objetivo "..tostring(idx).."/"..tostring(#points), "Intentando llegar...", 2)
+      local ok = followPositionWithFallback(pos, humanoid, hrp)
+      if not ok then
+         notify("No se alcanzó waypoint "..tostring(idx), "Intenta añadir waypoint intermedio", 3)
+         return
+      else
+         notify("Waypoint "..tostring(idx).." alcanzado", "", 1.2)
+      end
+      wait(0.15)
    end
+   notify("Ruta completada", "Todos los waypoints alcanzados", 3)
 end
 
 -- AUTO FARM
@@ -146,10 +185,8 @@ local function startAutoFarm()
       if not autoFarming then return end
       if #waypoints > 0 then
          if farmConnection then farmConnection:Disconnect(); farmConnection = nil end
-         -- seguir ruta en spawn para no bloquear
          spawn(function()
             followRoute(humanoid, hrp, waypoints)
-            -- una vez terminada, volver a iniciar loop si sigue activo
             if autoFarming then startAutoFarm() end
          end)
          return
@@ -216,33 +253,16 @@ local function stopRecording()
    notify("Grabación detenida", "Waypoints: "..tostring(#waypoints), 3)
 end
 
--- MENÚ
+-- MENU (mobile)
 function loadMainMenu()
    local MainTab = Window:CreateTab("Mundo 3", 4483362458)
 
-   MainTab:CreateToggle({
-      Name = "Limpiar Obstáculos (Mortales)",
-      CurrentValue = false,
-      Callback = function(Value) toggleCleanObstacles(Value) end,
-   })
-
-   MainTab:CreateToggle({
-      Name = "Auto Farm (Recorrido Mundo 3)",
-      CurrentValue = false,
-      Callback = function(Value) toggleAutoFarm(Value) end,
-   })
-
-   MainTab:CreateToggle({
-      Name = "Recording Route (auto)",
-      CurrentValue = false,
-      Callback = function(Value)
-         if Value then startRecording() else stopRecording() end
-      end,
-   })
+   MainTab:CreateToggle({ Name = "Limpiar Obstáculos (Mortales)", CurrentValue = false, Callback = function(Value) toggleCleanObstacles(Value) end })
+   MainTab:CreateToggle({ Name = "Auto Farm (Recorrido Mundo 3)", CurrentValue = false, Callback = function(Value) toggleAutoFarm(Value) end })
+   MainTab:CreateToggle({ Name = "Recording Route (auto)", CurrentValue = false, Callback = function(Value) if Value then startRecording() else stopRecording() end end })
 
    MainTab:CreateButton({ Name = "Add Current Position", Callback = function() addCurrentWaypoint() end })
    MainTab:CreateButton({ Name = "Play Route", Callback = function()
-      -- esperar character; ejecutar followRoute en spawn (móvil)
       spawn(function()
          local char = getCharacter(true)
          if not char then notify("Play fallo", "No se cargó tu personaje", 3); return end
@@ -256,7 +276,7 @@ function loadMainMenu()
       end)
    end })
    MainTab:CreateButton({ Name = "Clear Waypoints", Callback = function() clearWaypoints() end })
-   MainTab:CreateParagraph({Title = "Instrucciones (móvil)", Content = "Usa Recording para grabar automáticamente mientras caminas. Usa Add para puntos puntuales y Play para reproducir la ruta. Clear borra los puntos."})
+   MainTab:CreateParagraph({Title = "Instrucciones (móvil)", Content = "Recording: graba automáticamente. Add/Play/Clear controlan manualmente. Si Play no llega, añade puntos intermedios cerca del obstáculo."})
 end
 
 print("🔒 Script Mundo 3 cargado - Usa la clave XKR")
