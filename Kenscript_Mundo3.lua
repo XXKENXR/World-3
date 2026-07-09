@@ -1,3 +1,4 @@
+-- Kenscript_Mundo3.lua (simplificado: AutoFarm ejecuta ruta grabada, Record toggle, Clear button)
 local Rayfield = loadstring(game:HttpGet('https://sirius.menu/rayfield'))()
 
 local Window = Rayfield:CreateWindow({
@@ -7,34 +8,64 @@ local Window = Rayfield:CreateWindow({
    ConfigurationSaving = { Enabled = false },
 })
 
--- ==================== AUTO FARM, LIMPIAR OBSTÁCULOS Y GRABADOR DE RUTA ====================
+-- Key System
+local KeyTab = Window:CreateTab("Key System", 4483362458)
+
+local function onKeyEntered(Value)
+   if (Value or ""):upper() == "XKR" then
+      Rayfield:Notify({Title = "✅ Key Correcta", Content = "Acceso concedido", Duration = 4})
+      loadMainMenu()
+   else
+      Rayfield:Notify({Title = "❌ Key Incorrecta", Content = "Key Invalid", Duration = 3})
+   end
+end
+
+KeyTab:CreateInput({
+   Name = "Key",
+   PlaceholderText = "Ingresa la clave...",
+   Callback = onKeyEntered,
+})
+KeyTab:CreateParagraph({Title = "Nota", Content = "El mejor script"})
+
+-- SERVICES
 local RunService = game:GetService("RunService")
 local PathfindingService = game:GetService("PathfindingService")
-local UserInputService = game:GetService("UserInputService")
 local TweenService = game:GetService("TweenService")
 local Players = game:GetService("Players")
-
 local player = Players.LocalPlayer
 
+-- STATE
 local autoFarming = false
 local farmConnection = nil
 local obstaclesCleaned = false
 
--- Waypoints / recorder
-local waypoints = {}            -- array of Vector3
+-- WAYPOINTS / RECORDER
+local waypoints = {}
 local recording = false
-local recordConnection = nil
-local recordInterval = 0.5      -- segundos
-local recordMinDistance = 2     -- studs mínimo para añadir nuevo punto automáticamente
+local recordThread = nil
+local recordInterval = 0.5
+local recordMinDistance = 2
 
--- helper notify
+-- HELPERS
 local function notify(title, content, duration)
    if Rayfield and Rayfield.Notify then
       Rayfield:Notify({Title = title, Content = content, Duration = duration or 3})
    end
 end
 
--- ==================== LIMPIEZA DE OBSTÁCULOS (MEJORADA) ====================
+local function getCharacter(waitFor)
+   local char = player and player.Character
+   if char and char.Parent then return char end
+   if not waitFor then return nil end
+   for i = 1, 50 do
+      char = player and player.Character
+      if char and char.Parent then return char end
+      wait(0.1)
+   end
+   return nil
+end
+
+-- OBSTACLE CLEANER (cliente; puede no afectar objetos protegidos por servidor)
 local function isObstacleName(s)
    if not s then return false end
    s = s:lower()
@@ -44,43 +75,30 @@ end
 local function toggleCleanObstacles(state)
    obstaclesCleaned = state
    if state then
-      notify("Limpiar Obstáculos ON", "Eliminando obstáculos mortales...", 4)
+      notify("Limpiar Obstáculos ON", "Intentando atenuar obstáculos...", 4)
       spawn(function()
          while obstaclesCleaned do
             for _, v in pairs(workspace:GetDescendants()) do
                if v:IsA("BasePart") then
-                  local ok = pcall(function()
+                  pcall(function()
                      local name = v.Name or ""
                      local parentName = (v.Parent and v.Parent.Name) or ""
                      if isObstacleName(name) or isObstacleName(parentName) then
                         v.CanCollide = false
-                        v.Transparency = math.max(0.6, v.Transparency or 0)
+                        v.Transparency = math.max(0.75, v.Transparency or 0)
                      end
                   end)
-                  -- ignorar fallos (part protegido por el servidor)
                end
             end
             wait(1)
          end
       end)
    else
-      notify("Limpiar Obstáculos OFF", "Reactivado (no se restaura servidor-side)", 3)
+      notify("Limpiar Obstáculos OFF", "Desactivado (no restaura estado servidor-side)", 3)
    end
 end
 
--- ==================== PATHFINDING Y SEGUIMIENTO DE RUTA ====================
-local function getCharacter()
-   local char = player and player.Character
-   if char and char.Parent then return char end
-   -- esperar character
-   for i = 1, 50 do
-      char = player and player.Character
-      if char and char.Parent then return char end
-      wait(0.1)
-   end
-   return nil
-end
-
+-- PATHFINDING / FOLLOW
 local function followPosition(targetPos, humanoid, hrp)
    if not humanoid or not hrp then return false end
    local path = PathfindingService:CreatePath({AgentRadius = 2, AgentHeight = 5, AgentCanJump = true, AgentMaxSlope = 45})
@@ -88,92 +106,71 @@ local function followPosition(targetPos, humanoid, hrp)
    if path.Status ~= Enum.PathStatus.Success then
       return false
    end
-   local waypointsPath = path:GetWaypoints()
-   for _, wp in ipairs(waypointsPath) do
-      if wp.Action == Enum.PathWaypointAction.Jump then
-         humanoid.Jump = true
-      end
+   for _, wp in ipairs(path:GetWaypoints()) do
+      if wp.Action == Enum.PathWaypointAction.Jump then humanoid.Jump = true end
       humanoid:MoveTo(wp.Position)
       local ok = humanoid.MoveToFinished:Wait()
       if not ok then
-         -- si no llega al waypoint, intenta pequeño teletransporte seguro (fallback)
-         pcall(function()
-            hrp.CFrame = CFrame.new(wp.Position + Vector3.new(0, 3, 0))
-         end)
+         pcall(function() hrp.CFrame = CFrame.new(wp.Position + Vector3.new(0,3,0)) end)
       end
-      wait(0.05)
+      wait(0.03)
    end
    return true
 end
 
 local function followRoute(humanoid, hrp, points)
-   for i, pos in ipairs(points) do
-      local success = followPosition(pos, humanoid, hrp)
-      if not success then
-         -- fallback directo por Tween
+   for _, pos in ipairs(points) do
+      local ok = followPosition(pos, humanoid, hrp)
+      if not ok then
          pcall(function()
             local dist = (hrp.Position - pos).Magnitude
             local t = math.clamp(dist / 10, 0.2, 5)
-            local tweenInfo = TweenInfo.new(t, Enum.EasingStyle.Linear)
-            TweenService:Create(hrp, tweenInfo, {CFrame = CFrame.new(pos + Vector3.new(0, 3, 0))}):Play()
+            local tw = TweenService:Create(hrp, TweenInfo.new(t, Enum.EasingStyle.Linear), {CFrame = CFrame.new(pos + Vector3.new(0,3,0))})
+            tw:Play(); tw.Completed:Wait()
          end)
-         wait(0.5)
+         wait(0.2)
       end
    end
 end
 
--- ==================== AUTO FARM HANDLER ====================
-local function startAutoFarm()
-   local character = getCharacter()
-   if not character then return end
-   local humanoid = character:FindFirstChildOfClass("Humanoid")
-   local hrp = character:FindFirstChild("HumanoidRootPart")
-   if not humanoid or not hrp then return end
+-- AUTO FARM: ejecuta ruta grabada UNA vez cuando activas el toggle
+local function startAutoFarmOnce()
+   local char = getCharacter(true)
+   if not char then notify("No character", "Espera a que tu personaje cargue", 3); autoFarming = false; return end
+   local humanoid = char:FindFirstChildOfClass("Humanoid")
+   local hrp = char:FindFirstChild("HumanoidRootPart")
+   if not humanoid or not hrp then notify("No humanoid/HRP", "", 3); autoFarming = false; return end
 
-   farmConnection = RunService.Heartbeat:Connect(function(dt)
-      if not autoFarming then return end
-      if #waypoints > 0 then
-         -- desconectar loop para reproducir la ruta de forma síncrona
-         if farmConnection then farmConnection:Disconnect(); farmConnection = nil end
-         followRoute(humanoid, hrp, waypoints)
-         -- reactivar si autoFarming sigue activo
-         if autoFarming then startAutoFarm() end
-         return
-      else
-         -- movimiento simple hacia adelante (fallback)
-         local speed = 16
-         pcall(function()
-            hrp.CFrame = hrp.CFrame + hrp.CFrame.LookVector * (speed * 0.016)
-         end)
-         if math.random(1, 12) == 1 then humanoid.Jump = true end
-      end
-   end)
-end
-
-local function stopAutoFarm()
-   if farmConnection then
-      farmConnection:Disconnect()
-      farmConnection = nil
+   if #waypoints == 0 then
+      notify("No hay ruta grabada", "Graba la ruta antes de activar Auto Farm", 4)
+      autoFarming = false
+      return
    end
+
+   -- Ejecutar ruta (bloqueante hasta terminar)
+   notify("Auto Farm iniciando", "Ejecutando ruta grabada...", 4)
+   followRoute(humanoid, hrp, waypoints)
+   notify("Auto Farm completado", "Ruta finalizada", 4)
+   autoFarming = false
 end
 
 local function toggleAutoFarm(state)
    autoFarming = state
    if state then
-      notify("Auto Farm ON", "Recorriendo Mundo 3...", 4)
-      startAutoFarm()
+      -- start in a new thread to avoid blocking UI callback
+      spawn(function() startAutoFarmOnce() end)
    else
-      stopAutoFarm()
-      notify("Auto Farm OFF", "Detenido", 3)
+      -- user turned off; nothing extra que hacer porque la ejecución es sin bucle
+      notify("Auto Farm OFF", "Detenido", 2)
    end
 end
 
--- ==================== GRABADOR DE RUTA ====================
+-- RECORDER (toggle)
 local function addCurrentWaypoint()
-   local char = getCharacter()
-   if not char then return end
+   local char = getCharacter(false)
+   if not char then notify("No character", "Espera a que tu personaje cargue", 3); return end
    local hrp = char:FindFirstChild("HumanoidRootPart")
-   if not hrp then return end
+   if not hrp then notify("No HRP", "", 2); return end
    table.insert(waypoints, hrp.Position)
    notify("Waypoint añadido", "Total: "..tostring(#waypoints), 2)
 end
@@ -183,130 +180,64 @@ local function clearWaypoints()
    notify("Waypoints borrados", "", 2)
 end
 
+local function recorderLoop()
+   local lastPos = nil
+   while recording do
+      local char = getCharacter(false)
+      local hrp = char and char:FindFirstChild("HumanoidRootPart")
+      if hrp then
+         local pos = hrp.Position
+         if (not lastPos) or (pos - lastPos).Magnitude >= recordMinDistance then
+            table.insert(waypoints, pos)
+            lastPos = pos
+            notify("Waypoint auto añadido", "Total: "..tostring(#waypoints), 1.2)
+         end
+      end
+      wait(recordInterval)
+   end
+end
+
 local function startRecording()
    if recording then return end
    recording = true
-   notify("Grabación iniciada", "Movete por la ruta para grabarla", 3)
-   local lastPos = nil
-   recordConnection = spawn(function()
-      while recording do
-         local char = getCharacter()
-         local hrp = char and char:FindFirstChild("HumanoidRootPart")
-         if hrp then
-            local pos = hrp.Position
-            if not lastPos or (pos - lastPos).Magnitude >= recordMinDistance then
-               table.insert(waypoints, pos)
-               lastPos = pos
-               notify("Waypoint añadido (auto)", "Total: "..tostring(#waypoints), 1.2)
-            end
-         end
-         wait(recordInterval)
-      end
-   end)
+   notify("Grabación iniciada", "Muevete para grabar la ruta", 3)
+   recordThread = spawn(recorderLoop)
 end
 
 local function stopRecording()
    if not recording then return end
    recording = false
-   notify("Grabación parada", "Waypoints totales: "..tostring(#waypoints), 3)
-   -- recordConnection es spawn, no hace falta disconnect pero lo dejamos nil
-   recordConnection = nil
+   recordThread = nil
+   notify("Grabación detenida", "Waypoints: "..tostring(#waypoints), 3)
 end
 
--- Atajos de teclado (R: add, P: play, C: clear)
-local enableHotkeys = false
-UserInputService.InputBegan:Connect(function(input, gameProcessed)
-   if gameProcessed then return end
-   if not enableHotkeys then return end
-   if not UserInputService:IsKeyDown(Enum.KeyCode.LeftControl) then return end
-   if input.KeyCode == Enum.KeyCode.R then
-      addCurrentWaypoint()
-   elseif input.KeyCode == Enum.KeyCode.P then
-      local char = getCharacter()
-      local humanoid = char and char:FindFirstChildOfClass("Humanoid")
-      local hrp = char and char:FindFirstChild("HumanoidRootPart")
-      if humanoid and hrp and #waypoints > 0 then
-         followRoute(humanoid, hrp, waypoints)
-      else
-         notify("No hay waypoints", "Presiona R o usa el toggle de grabación", 3)
-      end
-   elseif input.KeyCode == Enum.KeyCode.C then
-      clearWaypoints()
-   end
-end)
-
--- ==================== MENÚ ====================
+-- MENÚ SIMPLE: Auto Farm ejecuta la ruta, Recording toggle, Clear button, Clean Obstacles
 function loadMainMenu()
    local MainTab = Window:CreateTab("Mundo 3", 4483362458)
 
    MainTab:CreateToggle({
       Name = "Limpiar Obstáculos (Mortales)",
       CurrentValue = false,
-      Callback = function(Value)
-         toggleCleanObstacles(Value)
-      end,
+      Callback = function(Value) toggleCleanObstacles(Value) end,
    })
 
    MainTab:CreateToggle({
-      Name = "Auto Farm (Recorrido Mundo 3)",
+      Name = "Auto Farm (Ejecuta ruta grabada)",
       CurrentValue = false,
-      Callback = function(Value)
-         toggleAutoFarm(Value)
-      end,
+      Callback = function(Value) toggleAutoFarm(Value) end,
    })
 
    MainTab:CreateToggle({
-      Name = "Recording Route (R = add, P = play, C = clear)",
+      Name = "Recording Route (toggle)",
       CurrentValue = false,
       Callback = function(Value)
-         if Value then
-            startRecording()
-         else
-            stopRecording()
-         end
+         if Value then startRecording() else stopRecording() end
       end,
    })
 
-   MainTab:CreateToggle({
-      Name = "Enable Hotkeys (Ctrl+R/P/C)",
-      CurrentValue = false,
-      Callback = function(Value) enableHotkeys = Value; notify("Hotkeys "..(Value and "ON" or "OFF"), "", 2) end,
-   })
+   MainTab:CreateButton({ Name = "Clear Waypoints (borrar ruta)", Callback = function() clearWaypoints() end })
 
-   MainTab:CreateButton({
-      Name = "Add Current Position (R)",
-      Callback = function()
-         addCurrentWaypoint()
-      end
-   })
-
-   MainTab:CreateButton({
-      Name = "Play Route (P)",
-      Callback = function()
-         local char = getCharacter()
-         local humanoid = char and char:FindFirstChildOfClass("Humanoid")
-         local hrp = char and char:FindFirstChild("HumanoidRootPart")
-         if humanoid and hrp and #waypoints > 0 then
-            followRoute(humanoid, hrp, waypoints)
-         else
-            notify("No hay waypoints", "Presiona R para añadir puntos o activa Recording", 3)
-         end
-      end
-   })
-
-   MainTab:CreateButton({
-      Name = "Clear Waypoints (C)",
-      Callback = function()
-         clearWaypoints()
-      end
-   })
-
-   MainTab:CreateParagraph({Title = "Instrucciones", Content = "Usa el toggle Recording para grabar la ruta automáticamente (cada 0.5s). O presiona R para añadir manualmente. Presiona Play para reproducir la ruta."})
+   MainTab:CreateParagraph({Title = "Instrucciones", Content = "1) Activa Recording y camina la ruta. 2) Desactiva Recording. 3) Activa Auto Farm para que el bot ejecute la ruta una vez. Usa Clear Waypoints para borrar y volver a grabar."})
 end
 
--- Auto-open the menu so no key is required
-pcall(function()
-   loadMainMenu()
-end)
-
-print("🔓 Script Mundo 3 cargado - Menú disponible")
+print("🔒 Script Mundo 3 cargado - Usa la clave XKR")
